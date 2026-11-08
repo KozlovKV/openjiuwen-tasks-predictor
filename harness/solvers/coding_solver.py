@@ -1,69 +1,80 @@
 """Bug fixing: the local test suite gives free verification after every edit."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from .. import sandbox
 from . import pycode
-from .common import SolveContext, SolveResult, Status, extract_code, retry_note, says_impossible
+from .common import (
+    SolveContext,
+    SolveResult,
+    Status,
+    extract_code_blocks,
+    retry_note,
+    says_impossible,
+)
 
 SYSTEM = (
-    "Fix the bugs in the Python module so that the failing tests pass. Fix the real "
-    "logic; never special-case test inputs. Reply with one python code block holding "
-    "only the complete new definitions of the functions or classes you change. "
-    "If the tests cannot be satisfied, reply only IMPOSSIBLE."
+    "Fix the bugs in the Python code so that the failing tests pass. Fix the real logic; "
+    "never special-case test inputs and never mock anything. Reply with one python code "
+    "block holding only what you change: whole functions, methods inside their class, or "
+    "module-level constants. If the tests cannot be satisfied, reply only IMPOSSIBLE."
 )
 DONE = "DONE"
 _TEST_TIMEOUT_SECONDS = 30.0
 _MAX_FULL_SOURCE_CHARS = 6_000
 
 
-async def _run_tests(ctx: SolveContext, script: str) -> sandbox.ExecResult:
-    return await sandbox.run_script(script, ctx.task.workdir, _TEST_TIMEOUT_SECONDS)
+def _prompt(sources: dict[str, str], failures: str, note: str) -> str:
+    total = sum(len(text) for text in sources.values())
+    shown = sources if total <= _MAX_FULL_SOURCE_CHARS else pycode.excerpt(sources, failures) or sources
+    code = "\n\n".join(f"{name}:\n```python\n{text}\n```" for name, text in shown.items())
+    broken = [name for name, text in sources.items() if not pycode.parses(text)]
+    hint = f"\n{broken[0]} has a syntax error, so reply with that whole file." if broken else ""
+    return f"{code}\n\nFailures:\n{failures}{hint}{note}"
 
 
-def _module_excerpt(source: str, failures: str) -> str:
-    if len(source) <= _MAX_FULL_SOURCE_CHARS:
-        return source
-    return pycode.definitions_mentioned(source, failures) or source[:_MAX_FULL_SOURCE_CHARS]
+def _write(workdir: Path, modules: dict[str, str]) -> None:
+    for name, text in modules.items():
+        (workdir / name).write_text(text, encoding="utf-8")
 
 
 async def solve(ctx: SolveContext) -> SolveResult:
     workdir = ctx.task.workdir
-    test_path = pycode.find_test_script(ctx.task.instruction, workdir)
-    if test_path is None:
+    command = pycode.find_test_command(ctx.task.instruction, workdir)
+    if command is None:
         return SolveResult(Status.IMPOSSIBLE)
-    target = pycode.find_target_module(ctx.task.instruction, workdir, test_path)
-    if target is None:
+    tests = pycode.test_files(command, workdir)
+    modules = pycode.source_modules(ctx.task.instruction, workdir, tests)
+    if not modules:
         return SolveResult(Status.IMPOSSIBLE)
-    script = test_path.relative_to(workdir).as_posix()
 
-    before = await _run_tests(ctx, script)
+    before = await sandbox.run_interpreter(command, workdir, _TEST_TIMEOUT_SECONDS)
     if before.ok:
         return SolveResult(Status.SOLVED, answer=DONE)
     report = before.stderr + before.stdout
     failures = pycode.summarize_failures(report) or report[-800:]
 
-    source = target.read_text(encoding="utf-8")
-    user = (
-        f"{target.name}:\n```python\n{_module_excerpt(source, failures)}\n```\n\n"
-        f"Failures:\n{failures}{retry_note(ctx.attempt)}"
-    )
-    reply = await ctx.ask(SYSTEM, user, "coding")
+    sources = {
+        path.relative_to(workdir).as_posix(): path.read_text(encoding="utf-8") for path in modules
+    }
+    reply = await ctx.ask(SYSTEM, _prompt(sources, failures, retry_note(ctx.attempt)), "coding")
     if says_impossible(reply):
         return SolveResult(Status.IMPOSSIBLE)
     try:
-        patched = pycode.apply_definitions(source, extract_code(reply))
+        patched = pycode.apply_reply(sources, extract_code_blocks(reply))
     except SyntaxError as exc:
         return SolveResult(Status.RETRY, feedback=f"your code had a syntax error: {exc.msg}")
-    if patched == source:
-        return SolveResult(Status.RETRY, feedback="your reply changed no definitions")
+    changed = {name: text for name, text in patched.items() if text != sources[name]}
+    if not changed:
+        return SolveResult(Status.RETRY, feedback="your reply changed nothing")
 
-    target.write_text(patched, encoding="utf-8")
-    after = await _run_tests(ctx, script)
+    _write(workdir, changed)
+    after = await sandbox.run_interpreter(command, workdir, _TEST_TIMEOUT_SECONDS)
     if after.ok:
         return SolveResult(Status.SOLVED, answer=DONE)
-    after_report = after.stderr + after.stdout
-    if pycode.failure_count(after_report) >= max(1, pycode.failure_count(report)) + 1:
-        # The edit made things worse, so the next attempt starts from the old code.
-        target.write_text(source, encoding="utf-8")
+    if pycode.made_worse(report, after.stderr + after.stdout):
+        # The next attempt starts from the old code rather than from a regression.
+        _write(workdir, {name: sources[name] for name in changed})
         return SolveResult(Status.RETRY, feedback="that edit broke more tests")
     return SolveResult(Status.RETRY)

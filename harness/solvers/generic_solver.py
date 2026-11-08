@@ -95,10 +95,10 @@ def _build_agent(ctx: SolveContext, tool: LocalFunction) -> ReActAgent:
 
 
 async def _verified_coding_result(ctx: SolveContext) -> SolveResult:
-    script = pycode.find_test_script(ctx.task.instruction, ctx.task.workdir)
-    if script is None:
+    command = pycode.find_test_command(ctx.task.instruction, ctx.task.workdir)
+    if command is None:
         return SolveResult(Status.RETRY)
-    result = await sandbox.run_script(script.name, ctx.task.workdir)
+    result = await sandbox.run_interpreter(command, ctx.task.workdir)
     return (
         SolveResult(Status.SOLVED, answer=coding_solver.DONE)
         if result.ok

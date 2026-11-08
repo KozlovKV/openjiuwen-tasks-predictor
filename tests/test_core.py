@@ -16,6 +16,7 @@ from harness.solvers import kb, math_solver, pycode  # noqa: E402
 from harness.solvers.common import (  # noqa: E402
     answer_from_output,
     extract_code,
+    extract_code_blocks,
     normalize_number,
     SolveResult,
     Status,
@@ -140,21 +141,103 @@ class MathDecisionTest(unittest.TestCase):
 
 class PatchingTest(unittest.TestCase):
     SOURCE = "import os\n\n\ndef a():\n    return 1\n\n\ndef b():\n    return 2\n"
+    CLASS = (
+        "class C:\n    limit = 1\n\n    def x(self):\n        return 1\n\n"
+        "    def y(self):\n        return 2\n"
+    )
+
+    @staticmethod
+    def apply(source: str, patch: str) -> str:
+        return pycode.apply_reply({"m.py": source}, [patch])["m.py"]
 
     def test_replaces_only_named_definition(self) -> None:
-        patched = pycode.apply_definitions(self.SOURCE, "def b():\n    return 3\n")
+        patched = self.apply(self.SOURCE, "def b():\n    return 3\n")
         self.assertIn("return 1", patched)
         self.assertIn("return 3", patched)
         self.assertNotIn("return 2", patched)
 
     def test_adds_new_definition_and_import(self) -> None:
-        patched = pycode.apply_definitions(self.SOURCE, "import re\n\ndef c():\n    return re\n")
+        patched = self.apply(self.SOURCE, "import re\n\ndef c():\n    return re\n")
         self.assertTrue(patched.startswith("import re"))
         self.assertIn("def c():", patched)
 
     def test_rejects_bad_syntax(self) -> None:
         with self.assertRaises(SyntaxError):
-            pycode.apply_definitions(self.SOURCE, "def b(:\n")
+            self.apply(self.SOURCE, "def b(:\n")
+
+    def test_replaces_module_constant(self) -> None:
+        patched = self.apply("RATE = 1\n\n\ndef f():\n    return RATE\n", "RATE = 2\n")
+        self.assertIn("RATE = 2", patched)
+        self.assertNotIn("RATE = 1", patched)
+
+    def test_partial_class_keeps_other_members(self) -> None:
+        patched = self.apply(self.CLASS, "class C:\n    def x(self):\n        return 9\n")
+        self.assertIn("return 9", patched)
+        self.assertIn("return 2", patched)
+        self.assertIn("limit = 1", patched)
+
+    def test_partial_class_updates_attribute_and_adds_method(self) -> None:
+        patched = self.apply(self.CLASS, "class C:\n    limit = 5\n\n    def z(self):\n        return 3\n")
+        self.assertIn("limit = 5", patched)
+        self.assertIn("    def z(self):", patched)
+
+    def test_method_without_its_class(self) -> None:
+        patched = self.apply(self.CLASS, "def y(self):\n    return 7\n")
+        self.assertIn("        return 7", patched)
+        self.assertNotIn("return 2", patched)
+
+    def test_indented_methods_in_a_fence(self) -> None:
+        reply = "```python\n    def x(self):\n        return 8\n\n    def y(self):\n        return 9\n```"
+        patched = pycode.apply_reply({"m.py": self.CLASS}, extract_code_blocks(reply))["m.py"]
+        self.assertIn("        return 8", patched)
+        self.assertIn("        return 9", patched)
+        self.assertIn("limit = 1", patched)
+
+    def test_ellipsis_placeholder_changes_nothing(self) -> None:
+        patched = self.apply(self.CLASS, "class C:\n    def y(self): ...\n")
+        self.assertIn("return 2", patched)
+
+    def test_stray_statements_are_dropped(self) -> None:
+        patched = self.apply(self.SOURCE, "print(a())\nvalue = a()\n\ndef b():\n    return 3\n")
+        self.assertNotIn("print(", patched)
+        self.assertNotIn("value =", patched)
+
+    def test_new_constant_used_by_patch_is_inserted_before_code(self) -> None:
+        patched = self.apply(self.SOURCE, "LIMIT = 3\n\ndef b():\n    return LIMIT\n")
+        self.assertLess(patched.index("LIMIT = 3"), patched.index("def a"))
+
+    def test_edits_are_routed_across_modules(self) -> None:
+        sources = {"a.py": "def f():\n    return 1\n", "b.py": "def g():\n    return 2\n"}
+        patched = pycode.apply_reply(sources, ["def g():\n    return 3\n"])
+        self.assertEqual(patched["a.py"], sources["a.py"])
+        self.assertIn("return 3", patched["b.py"])
+
+    def test_broken_file_is_replaced_whole(self) -> None:
+        broken = "def f()\n    return 1\n\n\ndef g():\n    return 2\n"
+        fixed = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"
+        self.assertEqual(self.apply(broken, fixed), fixed)
+
+    def test_broken_file_is_kept_when_reply_is_partial(self) -> None:
+        broken = "def f()\n    return 1\n\n\ndef g():\n    return 2\n"
+        self.assertEqual(self.apply(broken, "def f():\n    return 1\n"), broken)
+
+    def test_regression_needs_two_real_test_runs(self) -> None:
+        ran = "F\nFAIL: test_a (x)\nRan 2 tests in 0.0s\n"
+        worse = "F\nFAIL: test_a (x)\nFAIL: test_b (x)\nRan 2 tests in 0.0s\n"
+        self.assertTrue(pycode.made_worse(ran, worse))
+        self.assertFalse(pycode.made_worse(worse, ran))
+        self.assertFalse(pycode.made_worse("SyntaxError: bad", worse))
+
+    def test_excerpt_follows_calls_into_other_modules(self) -> None:
+        sources = {
+            "a.py": "from b import helper\n\n\ndef top():\n    return helper()\n\n\ndef other():\n    return 1\n",
+            "b.py": "RATE = 2\n\n\ndef helper():\n    return RATE\n\n\ndef unused():\n    return 3\n",
+        }
+        shown = pycode.excerpt(sources, "FAIL: test_top\n  m.top() != 5")
+        self.assertIn("def helper", shown["b.py"])
+        self.assertIn("RATE = 2", shown["b.py"])
+        self.assertNotIn("def unused", shown["b.py"])
+        self.assertNotIn("def other", shown["a.py"])
 
     def test_summarize_keeps_assertion(self) -> None:
         report = (
@@ -169,6 +252,50 @@ class PatchingTest(unittest.TestCase):
         self.assertIn("-6 != 6", summary)
         self.assertNotIn("Ran 1 test", summary)
         self.assertEqual(pycode.failure_count(report), 1)
+
+
+class TestDiscoveryTest(unittest.TestCase):
+    @staticmethod
+    def layout(root: Path, *names: str) -> Path:
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        return root
+
+    def test_script_command_from_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = self.layout(Path(raw), "check_lib.py", "mylib.py")
+            command = pycode.find_test_command("Run `python3 check_lib.py` now.", root)
+            self.assertEqual(command, ["check_lib.py"])
+            self.assertEqual(pycode.test_files(command, root), [root / "check_lib.py"])
+
+    def test_module_command_from_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = self.layout(Path(raw), "tests/test_c.py", "c.py")
+            command = pycode.find_test_command("Run `python3 -m unittest discover -s tests` now.", root)
+            self.assertEqual(command, ["-m", "unittest", "discover", "-s", "tests"])
+            self.assertEqual(pycode.test_files(command, root), [root / "tests" / "test_c.py"])
+
+    def test_falls_back_to_tests_in_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = self.layout(Path(raw), "unit/test_c.py", "c.py")
+            self.assertEqual(
+                pycode.find_test_command("Fix the code.", root),
+                ["-m", "unittest", "discover", "-s", "unit"],
+            )
+
+    def test_no_tests_at_all(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            self.assertIsNone(pycode.find_test_command("Fix it.", self.layout(Path(raw), "c.py")))
+
+    def test_modules_ranked_and_tests_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = self.layout(Path(raw), "a.py", "b.py", "z.py", "tests/helper.py")
+            test_path = root / "test_x.py"
+            test_path.write_text("import b\n", encoding="utf-8")
+            modules = pycode.source_modules("Fix the bugs in z.py.", root, [test_path])
+            self.assertEqual([path.name for path in modules], ["z.py", "b.py", "a.py"])
 
 
 class KnowledgeBaseTest(unittest.TestCase):
@@ -196,6 +323,12 @@ class FeasibilityTest(unittest.TestCase):
     def test_valid_coding_task_accepted(self) -> None:
         verdict = self._check("coding", "Run `python3 test_mylib.py`. Fix mylib.py.",
                               {"mylib.py": "def f(x):\n    return x\n", "test_mylib.py": self.TESTS})
+        self.assertTrue(verdict.feasible, verdict.reason)
+
+    def test_tests_in_subdirectory_accepted(self) -> None:
+        verdict = self._check("coding", "Run `python3 -m unittest discover -s tests`. Fix calc.py.",
+                              {"calc.py": "def f(x):\n    return x\n",
+                               "tests/test_calc.py": self.TESTS.replace("mylib", "calc")})
         self.assertTrue(verdict.feasible, verdict.reason)
 
     def test_contradictory_tests_rejected(self) -> None:

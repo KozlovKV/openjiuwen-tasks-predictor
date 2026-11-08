@@ -75,10 +75,10 @@ async def run_python(
     return await run_argv([sys.executable, "-c", code], cwd, timeout)
 
 
-async def run_script(
-    script: str, cwd: Path, timeout: float = DEFAULT_TIMEOUT_SECONDS
+async def run_interpreter(
+    arguments: list[str], cwd: Path, timeout: float = DEFAULT_TIMEOUT_SECONDS
 ) -> ExecResult:
-    return await run_argv([sys.executable, script], cwd, timeout)
+    return await run_argv([sys.executable, *arguments], cwd, timeout)
 
 
 async def run_shell(

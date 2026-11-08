@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import enum
 import re
+import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -77,6 +78,12 @@ def clean_reply(text: str) -> str:
 def extract_code(text: str) -> str:
     match = _FENCE_RE.search(text)
     return (match.group(1) if match else text).strip()
+
+
+def extract_code_blocks(text: str) -> list[str]:
+    # Models often send methods still indented as in their class.
+    blocks = [textwrap.dedent(block).strip() for block in _FENCE_RE.findall(text)]
+    return blocks or [textwrap.dedent(text).strip()]
 
 
 def says_impossible(text: str) -> bool:

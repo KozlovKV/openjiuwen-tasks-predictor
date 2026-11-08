@@ -134,11 +134,12 @@ def _test_contradiction(tree: ast.Module) -> str:
     return ""
 
 
-def _module_available(name: str, workdir: Path) -> bool:
-    if name in sys.stdlib_module_names or (workdir / f"{name}.py").exists():
+def _module_available(name: str, workdir: Path, test_directory: Path) -> bool:
+    if name in sys.stdlib_module_names:
         return True
-    if (workdir / name).is_dir():
-        return True
+    for directory in (workdir, test_directory):
+        if (directory / f"{name}.py").exists() or (directory / name).is_dir():
+            return True
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
@@ -147,20 +148,24 @@ def _module_available(name: str, workdir: Path) -> bool:
 
 def _check_coding(task: Task) -> Verdict:
     workdir = task.workdir
-    test_path = pycode.find_test_script(task.instruction, workdir)
-    if test_path is None:
+    command = pycode.find_test_command(task.instruction, workdir)
+    if command is None:
         return _reject("no test script")
-    try:
-        tree = ast.parse(test_path.read_text(encoding="utf-8"))
-    except SyntaxError:
-        return _reject("the test script does not parse")
-    for module in pycode.imported_modules(test_path):
-        if not _module_available(module, workdir):
-            return _reject(f"tests import missing module {module}")
-    if pycode.find_target_module(task.instruction, workdir, test_path) is None:
+    tests = pycode.test_files(command, workdir)
+    for path in tests:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            return _reject("a test script does not parse")
+        for module in pycode.imported_modules(path):
+            if not _module_available(module, workdir, path.parent):
+                return _reject(f"tests import missing module {module}")
+        contradiction = _test_contradiction(tree)
+        if contradiction:
+            return _reject(contradiction)
+    if not pycode.source_modules(task.instruction, workdir, tests):
         return _reject("no module to fix")
-    contradiction = _test_contradiction(tree)
-    return _reject(contradiction) if contradiction else _OK
+    return _OK
 
 
 _TYPE_CHECKS = {
