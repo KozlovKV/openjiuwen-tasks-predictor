@@ -1,0 +1,52 @@
+{
+  "math/fast": {
+    "base": 75.85,
+    "per_char": 0.1264,
+    "p_solve": 0.99
+  },
+  "math/reason": {
+    "base": 127.14,
+    "per_char": 0.5021,
+    "p_solve": 0.99
+  },
+  "search/fast": {
+    "base": 19.96,
+    "per_char": 0.2656,
+    "p_solve": 0.99
+  },
+  "search/reason": {
+    "base": 200.0,
+    "per_char": 0.03,
+    "p_solve": 0.6
+  },
+  "data_analysis/fast": {
+    "base": 121.05,
+    "per_char": 0.0,
+    "p_solve": 0.99
+  },
+  "data_analysis/reason": {
+    "base": 400.0,
+    "per_char": 0.03,
+    "p_solve": 0.6
+  },
+  "coding/fast": {
+    "base": 102.41,
+    "per_char": 0.0,
+    "p_solve": 0.99
+  },
+  "coding/reason": {
+    "base": 900.0,
+    "per_char": 0.03,
+    "p_solve": 0.5
+  },
+  "unknown/fast": {
+    "base": 400.0,
+    "per_char": 0.1,
+    "p_solve": 0.5
+  },
+  "unknown/reason": {
+    "base": 1200.0,
+    "per_char": 0.1,
+    "p_solve": 0.5
+  }
+}

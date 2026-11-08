@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+.venv
+__pycache__
+*.pyc
+logs
+runs
+tasks
+task-dir
+train-tasks
+tests
+tools
+trajectories
+README.md
